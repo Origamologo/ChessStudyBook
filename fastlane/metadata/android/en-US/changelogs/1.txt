@@ -1,0 +1,1 @@
+Initial release of ChessStudyBook v1.0.0 with PDF/EPUB/TXT split-screen reader, PGN variation tree editor, board setup mode, and external Stockfish UCI analysis.

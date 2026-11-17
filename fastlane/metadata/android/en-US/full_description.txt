@@ -1,0 +1,8 @@
+ChessStudyBook is an offline, open-source Android app designed for studying chess books alongside an interactive chessboard and PGN game viewer/editor.
+
+Features:
+- Split-screen reader supporting PDF, EPUB, and plain text (TXT) chess books while playing through variations on the board.
+- Full PGN game loader, editor, and saver with support for nested variations, comments, and Standard Algebraic Notation (SAN).
+- Position setup mode to quickly mirror diagrams from any book page onto the board, including turn selection and castling rights.
+- UCI Chess Engine integration: automatically detects external Stockfish installations (via F-Droid or Google Play) or user-supplied local UCI engine binaries for real-time evaluation and best-line analysis.
+- 100% offline with zero trackers, ads, or network permissions.
