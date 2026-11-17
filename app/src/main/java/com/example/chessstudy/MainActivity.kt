@@ -1164,6 +1164,92 @@ fun CompactMetaField(
     }
 }
 
+object SessionPrefs {
+    private const val PREFS_NAME = "chess_study_session"
+    private const val KEY_BOOK_URI = "book_uri"
+    private const val KEY_BOOK_PAGE = "book_page"
+    private const val KEY_BOOK_SCROLL = "book_scroll"
+    private const val KEY_SERIALIZED_TREE = "serialized_tree"
+    private const val KEY_CURRENT_NODE_ID = "current_node_id"
+    private const val KEY_NEXT_NODE_ID = "next_node_id"
+    private const val KEY_FULL_PGN_RAW = "full_pgn_raw"
+    private const val KEY_ACTIVE_GAME_INDEX = "active_game_index"
+
+    fun persistUriPermission(context: Context, uri: Uri) {
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+        }.onFailure {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+    }
+
+    fun saveBookState(context: Context, uriString: String?, page: Int, scrollOffset: Int) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().apply {
+            if (uriString != null) putString(KEY_BOOK_URI, uriString)
+            putInt(KEY_BOOK_PAGE, page)
+            putInt(KEY_BOOK_SCROLL, scrollOffset)
+            apply()
+        }
+    }
+
+    fun saveFullPgnRaw(context: Context, fullPgnRaw: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_FULL_PGN_RAW, fullPgnRaw)
+            .apply()
+    }
+
+    fun saveBoardTreeState(
+        context: Context,
+        serializedTree: List<String>,
+        currentNodeId: Int,
+        nextNodeId: Int,
+        activeGameIndex: Int,
+        fullPgnRaw: String? = null
+    ) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().apply {
+            putString(KEY_SERIALIZED_TREE, serializedTree.joinToString("\n"))
+            putInt(KEY_CURRENT_NODE_ID, currentNodeId)
+            putInt(KEY_NEXT_NODE_ID, nextNodeId)
+            putInt(KEY_ACTIVE_GAME_INDEX, activeGameIndex)
+            if (fullPgnRaw != null) putString(KEY_FULL_PGN_RAW, fullPgnRaw)
+            apply()
+        }
+    }
+
+    fun getBookUri(context: Context): Uri? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_BOOK_URI, null)?.let { Uri.parse(it) }
+
+    fun getBookPage(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_BOOK_PAGE, 0)
+
+    fun getBookScroll(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_BOOK_SCROLL, 0)
+
+    fun getSerializedTree(context: Context): ArrayList<String>? {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_SERIALIZED_TREE, null) ?: return null
+        if (raw.isBlank()) return null
+        return ArrayList(raw.lines())
+    }
+
+    fun getCurrentNodeId(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_CURRENT_NODE_ID, 0)
+
+    fun getNextNodeId(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_NEXT_NODE_ID, 1)
+
+    fun getFullPgnRaw(context: Context): String? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_FULL_PGN_RAW, null)
+
+    fun getActiveGameIndex(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_ACTIVE_GAME_INDEX, 0)
+}
+
 @Composable
 fun ChessStudyScreen() {
     val context = LocalContext.current
@@ -1422,6 +1508,8 @@ fun ChessStudyScreen() {
             updatedList[safeIdx] = buildCurrentGameEntry(safeIdx + 1)
         }
         loadedPgnGames = updatedList
+        val combinedRaw = updatedList.joinToString("\n\n") { it.rawPgn.trim() }
+        SessionPrefs.saveFullPgnRaw(context, combinedRaw)
         return updatedList
     }
 
@@ -1492,6 +1580,7 @@ fun ChessStudyScreen() {
             Toast.makeText(context, "No valid PGN found in $sourceLabel", Toast.LENGTH_SHORT).show()
             return
         }
+        SessionPrefs.saveFullPgnRaw(context, rawPgn)
         loadedPgnGames = games
         applySingleGameEntryToBoard(games[0], 0)
         if (games.size > 1) {
@@ -1527,6 +1616,114 @@ fun ChessStudyScreen() {
         }
     }
 
+    var activeBookUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var hasRestoredSession by rememberSaveable { mutableStateOf(false) }
+
+    fun openBookFromUri(uri: Uri, targetPage: Int = 0, targetScroll: Int = 0, isRestoring: Boolean = false) {
+        val mime = context.contentResolver.getType(uri)?.lowercase() ?: ""
+        val displayName = getDisplayFileName(context, uri)
+        activeBookUriString = uri.toString()
+        if (!isRestoring) {
+            bookZoom = 1f
+            pdfPanX = 0f
+            pdfPanY = 0f
+        }
+        when {
+            mime.contains("pdf") || displayName.endsWith(".pdf") -> {
+                epubChapters = emptyList()
+                pdfUriString = uri.toString()
+                renderPdfPage(uri, targetPage)
+            }
+            mime.contains("epub") || displayName.endsWith(".epub") -> {
+                pdfBitmap = null
+                pdfUriString = null
+                val chapters = extractEpubChapters(context, uri)
+                epubChapters = chapters
+                totalPages = chapters.size
+                val safePage = targetPage.coerceIn(0, (chapters.size - 1).coerceAtLeast(0))
+                currentPage = safePage
+                bookText = chapters.getOrNull(safePage) ?: "Empty EPUB"
+                scope.launch { bookScrollState.scrollTo(targetScroll) }
+            }
+            else -> {
+                pdfBitmap = null
+                pdfUriString = null
+                epubChapters = emptyList()
+                totalPages = 0
+                val textContent = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use {
+                    it.readText()
+                } ?: ""
+                bookText = textContent
+                scope.launch { bookScrollState.scrollTo(targetScroll) }
+
+                val looksLikePgn = displayName.endsWith(".pgn") ||
+                        mime.contains("pgn") ||
+                        Regex("\\b1\\.\\s*([NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]|O-O)").containsMatchIn(textContent)
+                if (!isRestoring && looksLikePgn) {
+                    loadPgnStringOntoBoard(textContent, displayName.ifEmpty { "file" })
+                }
+            }
+        }
+    }
+
+    // 1. Restore last book, page, scroll offset, PGN collection, and exact move on app startup
+    LaunchedEffect(Unit) {
+        if (!hasRestoredSession) {
+            hasRestoredSession = true
+
+            // Restore Book (PDF, EPUB, or TXT)
+            SessionPrefs.getBookUri(context)?.let { savedBookUri ->
+                runCatching {
+                    val savedPage = SessionPrefs.getBookPage(context)
+                    val savedScroll = SessionPrefs.getBookScroll(context)
+                    openBookFromUri(savedBookUri, savedPage, savedScroll, isRestoring = true)
+                }
+            }
+
+            // Restore PGN Games & Move Tree Position
+            SessionPrefs.getFullPgnRaw(context)?.let { savedRawPgn ->
+                if (savedRawPgn.isNotBlank()) {
+                    val games = splitMultiGamePgn(savedRawPgn)
+                    if (games.isNotEmpty()) {
+                        loadedPgnGames = games
+                        val savedIdx = SessionPrefs.getActiveGameIndex(context).coerceIn(0, games.lastIndex)
+                        applySingleGameEntryToBoard(games[savedIdx], savedIdx)
+                    }
+                }
+            }
+
+            SessionPrefs.getSerializedTree(context)?.let { savedTree ->
+                val parsedNodes = deserializeNodes(savedTree)
+                if (parsedNodes.isNotEmpty()) {
+                    serializedTree = savedTree
+                    val savedNodeId = SessionPrefs.getCurrentNodeId(context)
+                    currentNodeId = if (parsedNodes.containsKey(savedNodeId)) savedNodeId else 0
+                    nextNodeId = SessionPrefs.getNextNodeId(context)
+                }
+            }
+        }
+    }
+
+    // 2. Auto-save book page & scroll position whenever they change
+    LaunchedEffect(activeBookUriString, currentPage, bookScrollState.value) {
+        if (hasRestoredSession && activeBookUriString != null) {
+            SessionPrefs.saveBookState(context, activeBookUriString, currentPage, bookScrollState.value)
+        }
+    }
+
+    // 3. Auto-save PGN tree & current move position whenever a move is played or navigated
+    LaunchedEffect(serializedTree, currentNodeId, nextNodeId, activeGameIndex) {
+        if (hasRestoredSession) {
+            SessionPrefs.saveBoardTreeState(
+                context = context,
+                serializedTree = serializedTree,
+                currentNodeId = currentNodeId,
+                nextNodeId = nextNodeId,
+                activeGameIndex = activeGameIndex
+            )
+        }
+    }
+
     LaunchedEffect(pdfUriString, currentPage) {
         if (pdfUriString != null && pdfBitmap == null) {
             renderPdfPage(Uri.parse(pdfUriString), currentPage)
@@ -1537,44 +1734,9 @@ fun ChessStudyScreen() {
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            val mime = context.contentResolver.getType(uri)?.lowercase() ?: ""
-            val displayName = getDisplayFileName(context, uri)
-            bookZoom = 1f
-            pdfPanX = 0f
-            pdfPanY = 0f
-            when {
-                mime.contains("pdf") || displayName.endsWith(".pdf") -> {
-                    epubChapters = emptyList()
-                    pdfUriString = uri.toString()
-                    renderPdfPage(uri, 0)
-                }
-                mime.contains("epub") || displayName.endsWith(".epub") -> {
-                    pdfBitmap = null
-                    pdfUriString = null
-                    val chapters = extractEpubChapters(context, uri)
-                    epubChapters = chapters
-                    totalPages = chapters.size
-                    currentPage = 0
-                    bookText = chapters.firstOrNull() ?: "Empty EPUB"
-                }
-                else -> {
-                    pdfBitmap = null
-                    pdfUriString = null
-                    epubChapters = emptyList()
-                    totalPages = 0
-                    val textContent = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use {
-                        it.readText()
-                    } ?: ""
-                    bookText = textContent
-
-                    val looksLikePgn = displayName.endsWith(".pgn") ||
-                            mime.contains("pgn") ||
-                            Regex("\\b1\\.\\s*([NBRQK]?[a-h]?[1-8]?x?[a-h][1-8]|O-O)").containsMatchIn(textContent)
-                    if (looksLikePgn) {
-                        loadPgnStringOntoBoard(textContent, displayName.ifEmpty { "file" })
-                    }
-                }
-            }
+            SessionPrefs.persistUriPermission(context, uri)
+            openBookFromUri(uri, targetPage = 0, targetScroll = 0, isRestoring = false)
+            SessionPrefs.saveBookState(context, uri.toString(), 0, 0)
         }
     }
 
@@ -1582,6 +1744,7 @@ fun ChessStudyScreen() {
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
+            SessionPrefs.persistUriPermission(context, uri)
             val textContent = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use {
                 it.readText()
             } ?: ""
