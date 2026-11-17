@@ -13,3 +13,19 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Ignore large compiled Stockfish binaries
+app/src/main/jniLibs/
+*.so
+
+# Ignore Keystores & NDK binaries
+*.jks
+keystore.properties
+app/src/main/jniLibs/
+*.so
+
+app/release/
+*.apk
+*.aab
+*.odt
+git_merge_foss_distribution_guide.md
