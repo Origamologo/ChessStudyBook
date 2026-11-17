@@ -830,7 +830,10 @@ fun pieceToSolidGlyph(piece: Char): String = when (piece.lowercaseChar()) {
 }
 
 @Composable
-fun SolidChessPiece(piece: Char) {
+fun SolidChessPiece(
+    piece: Char,
+    pieceFontSize: androidx.compose.ui.unit.TextUnit = 24.sp
+) {
     if (piece == ' ') return
     val glyph = pieceToSolidGlyph(piece)
     val isWhite = piece.isUpperCase()
@@ -847,7 +850,7 @@ fun SolidChessPiece(piece: Char) {
             for ((dx, dy) in offsets) {
                 Text(
                     text = glyph,
-                    fontSize = 24.sp,
+                    fontSize = pieceFontSize,
                     color = outlineColor,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.offset(x = dx, y = dy)
@@ -855,7 +858,7 @@ fun SolidChessPiece(piece: Char) {
             }
             Text(
                 text = glyph,
-                fontSize = 24.sp,
+                fontSize = pieceFontSize,
                 color = Color(0xFFFFFFFF),
                 textAlign = TextAlign.Center
             )
@@ -863,7 +866,7 @@ fun SolidChessPiece(piece: Char) {
     } else {
         Text(
             text = glyph,
-            fontSize = 24.sp,
+            fontSize = pieceFontSize,
             color = Color(0xFF180E07),
             textAlign = TextAlign.Center,
             style = TextStyle(
@@ -1264,12 +1267,10 @@ fun ChessStudyScreen() {
     var bookText by rememberSaveable {
         mutableStateOf(
             "📖 CHESS STUDY READER\n\n" +
-                    "• Tap '📂 Book' above to open a PDF, EPUB, TXT, or PGN file.\n" +
-                    "• Tap '♟️ Load PGN' to load single or multi-game PGN files onto the board.\n" +
-                    "• Tap '💾 Save PGN': Automatically remembers your current game's metadata and lets you edit it or save immediately.\n\n" +
+                    "• Tap '📂 Files ▾' above to open a Book (PDF, EPUB, TXT), load a PGN file, save your PGN, or switch games.\n\n" +
                     "⚡ EXTERNAL / LOCAL STOCKFISH SUPPORT:\n" +
                     "• Automatically detects any installed Stockfish app on your phone (or embedded/imported Stockfish).\n" +
-                    "• If Stockfish is not installed yet, tapping '⚡ Engine ▾' prompts you with 1-tap buttons to install it from F-Droid, Google Play, or local storage!"
+                    "• Tap '⚙️ Tools ▾' below the board to turn Stockfish ON, annotate moves, or configure the board!"
         )
     }
     var pdfUriString by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1303,7 +1304,7 @@ fun ChessStudyScreen() {
     var isEngineRunning by rememberSaveable { mutableStateOf(false) }
     var multiPvCount by rememberSaveable { mutableIntStateOf(3) }
     var engineEvalText by rememberSaveable {
-        mutableStateOf("Stockfish OFF • Tap '⚡ Engine ▾' for continuous analysis")
+        mutableStateOf("Stockfish OFF • Tap '⚙\uFE0F Tools ▾' for continuous analysis")
     }
     var showNotation by rememberSaveable(isLandscape) { mutableStateOf(!isLandscape) }
 
@@ -1334,11 +1335,19 @@ fun ChessStudyScreen() {
     var hasGameMetadataConfigured by rememberSaveable { mutableStateOf(false) }
 
     // --- MULTI-GAME PGN COLLECTION STATE ---
-    var loadedPgnGames by remember { mutableStateOf<List<PgnGameEntry>>(emptyList()) }
+    var loadedPgnGames by remember {
+        mutableStateOf(
+            SessionPrefs.getFullPgnRaw(context)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { splitMultiGamePgn(it) }
+                ?: emptyList()
+        )
+    }
     var activeGameIndex by rememberSaveable { mutableIntStateOf(0) }
     var showGamePickerDialog by rememberSaveable { mutableStateOf(false) }
 
     // --- UNFOLDING MENUS & TWO-STEP SAVE DIALOGS STATE ---
+    var showFilesMenu by remember { mutableStateOf(false) }
     var showBoardMenu by remember { mutableStateOf(false) }
     var showEngineMenu by remember { mutableStateOf(false) }
     var showAnnotationDialog by rememberSaveable { mutableStateOf(false) }
@@ -1714,6 +1723,14 @@ fun ChessStudyScreen() {
     // 3. Auto-save PGN tree & current move position whenever a move is played or navigated
     LaunchedEffect(serializedTree, currentNodeId, nextNodeId, activeGameIndex) {
         if (hasRestoredSession) {
+            if (loadedPgnGames.isNotEmpty()) {
+                val safeIdx = activeGameIndex.coerceIn(0, loadedPgnGames.lastIndex)
+                val updatedList = loadedPgnGames.toMutableList()
+                updatedList[safeIdx] = buildCurrentGameEntry(safeIdx + 1)
+                loadedPgnGames = updatedList
+                val combinedRaw = updatedList.joinToString("\n\n") { it.rawPgn.trim() }
+                SessionPrefs.saveFullPgnRaw(context, combinedRaw)
+            }
             SessionPrefs.saveBoardTreeState(
                 context = context,
                 serializedTree = serializedTree,
@@ -1781,7 +1798,7 @@ fun ChessStudyScreen() {
             if (located == null) {
                 isEngineRunning = false
                 showInstallStockfishDialog = true
-                engineEvalText = "⚠️ Stockfish not installed • Tap '⚡ Engine ▾' to install"
+                engineEvalText = "⚠️ Stockfish not installed • Tap '⚙\uFE0F Tools ▾' to install"
             } else {
                 val (engineFile, engineLabel) = located
                 engineEvalText = "⚡ $engineLabel analyzing top $multiPvCount lines..."
@@ -1798,7 +1815,7 @@ fun ChessStudyScreen() {
                 }
             }
         } else {
-            engineEvalText = "Stockfish OFF • Tap '⚡ Engine ▾' (PV: ${multiPvCount}x)"
+            engineEvalText = "Stockfish OFF • Tap '⚙\uFE0F Tools ▾' (PV: ${multiPvCount}x)"
         }
     }
 
@@ -2453,94 +2470,154 @@ fun ChessStudyScreen() {
         )
     }
 
-    // --- BOOK PANE ---
+    // --- BOOK PANE (Single Top-Left Menu + Inline Page & Zoom Bar) ---
     val bookPane: @Composable (Modifier) -> Unit = { mod ->
         Card(
             modifier = mod,
             colors = CardDefaults.cardColors(containerColor = ParchmentCardBg),
             border = BorderStroke(1.dp, Color(0xFFB08968))
         ) {
-            Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+            Column(modifier = Modifier.fillMaxSize().padding(6.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    // Upper-Left Single Unfolding Menu for Book, Load PGN, Save PGN, and Game Switcher (1/N)
+                    Box {
+                        val totalCount = loadedPgnGames.size.coerceAtLeast(1)
                         Button(
-                            onClick = {
-                                fileLauncher.launch(
-                                    arrayOf(
-                                        "application/pdf",
-                                        "application/epub+zip",
-                                        "text/*",
-                                        "application/x-chess-pgn",
-                                        "application/octet-stream"
-                                    )
-                                )
-                            },
+                            onClick = { showFilesMenu = true },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = WarmBrownButton,
                                 contentColor = Color(0xFFFFF8F0)
                             ),
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 30.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 3.dp)
+                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("📂 Book", fontSize = 10.sp)
+                            Text(
+                                text = "📂 Files ($totalCount) ▾",
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
 
-                        Button(
-                            onClick = { pgnFileLauncher.launch(arrayOf("*/*")) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF5C3A21),
-                                contentColor = Color(0xFFFFF8F0)
-                            ),
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 30.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 3.dp)
+                        DropdownMenu(
+                            expanded = showFilesMenu,
+                            onDismissRequest = { showFilesMenu = false },
+                            modifier = Modifier.background(ParchmentCardBg)
                         ) {
-                            Text("♟️ Load PGN", fontSize = 10.sp)
-                        }
-
-                        Button(
-                            onClick = {
-                                ensureCurrentMetadataLoadedAndSynced()
-                                val alreadyHasMetadata = hasGameMetadataConfigured ||
-                                        metaWhite.isNotBlank() ||
-                                        metaBlack.isNotBlank() ||
-                                        metaTournament.isNotBlank()
-                                if (alreadyHasMetadata) {
-                                    showSaveActionDialog = true
-                                } else {
-                                    showSaveMetadataDialog = true
+                            DropdownMenuItem(
+                                text = { Text("📖 Open Book (PDF / EPUB / TXT)", fontWeight = FontWeight.Bold, color = DeepEspressoText) },
+                                onClick = {
+                                    showFilesMenu = false
+                                    fileLauncher.launch(
+                                        arrayOf(
+                                            "application/pdf",
+                                            "application/epub+zip",
+                                            "text/*",
+                                            "application/x-chess-pgn",
+                                            "application/octet-stream"
+                                        )
+                                    )
                                 }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF3B6E33),
-                                contentColor = Color(0xFFFFF8F0)
-                            ),
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 30.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 3.dp)
-                        ) {
-                            Text("💾 Save PGN", fontSize = 10.sp)
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                ensureCurrentMetadataLoadedAndSynced()
-                                showGamePickerDialog = true
-                            },
-                            colors = tanButtonColors,
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 30.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 3.dp)
-                        ) {
-                            val totalCount = loadedPgnGames.size.coerceAtLeast(1)
-                            Text("📑 ${activeGameIndex + 1}/$totalCount", fontSize = 10.sp)
+                            )
+                            DropdownMenuItem(
+                                text = { Text("♟️ Load PGN File", fontWeight = FontWeight.Bold, color = Color(0xFF5C3A21)) },
+                                onClick = {
+                                    showFilesMenu = false
+                                    pgnFileLauncher.launch(arrayOf("*/*"))
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("💾 Save PGN", fontWeight = FontWeight.Bold, color = Color(0xFF2E5A27)) },
+                                onClick = {
+                                    showFilesMenu = false
+                                    ensureCurrentMetadataLoadedAndSynced()
+                                    val alreadyHasMetadata = hasGameMetadataConfigured ||
+                                            metaWhite.isNotBlank() ||
+                                            metaBlack.isNotBlank() ||
+                                            metaTournament.isNotBlank()
+                                    if (alreadyHasMetadata) {
+                                        showSaveActionDialog = true
+                                    } else {
+                                        showSaveMetadataDialog = true
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "📑 Games in PGN (${activeGameIndex + 1}/$totalCount)",
+                                        fontWeight = FontWeight.Bold,
+                                        color = DeepEspressoText
+                                    )
+                                },
+                                onClick = {
+                                    showFilesMenu = false
+                                    ensureCurrentMetadataLoadedAndSynced()
+                                    showGamePickerDialog = true
+                                }
+                            )
                         }
                     }
 
+                    // Center: Inline Page Navigation (Only shown when a multi-page book is open)
+                    if (totalPages > 1) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (currentPage > 0) {
+                                        pdfPanX = 0f; pdfPanY = 0f
+                                        if (pdfUriString != null) {
+                                            renderPdfPage(Uri.parse(pdfUriString), currentPage - 1)
+                                        } else if (epubChapters.isNotEmpty()) {
+                                            currentPage--
+                                            bookText = epubChapters[currentPage]
+                                            scope.launch { bookScrollState.scrollTo(0) }
+                                        }
+                                    }
+                                },
+                                colors = tanButtonColors,
+                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) { Text("◀", fontSize = 10.sp, maxLines = 1, softWrap = false) }
+
+                            Text(
+                                text = "${currentPage + 1}/$totalPages",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = DeepEspressoText,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 2.dp)
+                            )
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (currentPage < totalPages - 1) {
+                                        pdfPanX = 0f; pdfPanY = 0f
+                                        if (pdfUriString != null) {
+                                            renderPdfPage(Uri.parse(pdfUriString), currentPage + 1)
+                                        } else if (epubChapters.isNotEmpty()) {
+                                            currentPage++
+                                            bookText = epubChapters[currentPage]
+                                            scope.launch { bookScrollState.scrollTo(0) }
+                                        }
+                                    }
+                                },
+                                colors = tanButtonColors,
+                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) { Text("▶", fontSize = 10.sp, maxLines = 1, softWrap = false) }
+                        }
+                    }
+
+                    // Right: Compact Zoom Controls
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedButton(
                             onClick = {
@@ -2548,17 +2625,19 @@ fun ChessStudyScreen() {
                                 if (bookZoom == 1f) { pdfPanX = 0f; pdfPanY = 0f }
                             },
                             colors = tanButtonColors,
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
-                        ) { Text("🔍-", fontSize = 10.sp) }
+                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
+                            contentPadding = PaddingValues(horizontal = 5.dp, vertical = 2.dp)
+                        ) { Text("🔍-", fontSize = 10.sp, maxLines = 1, softWrap = false) }
 
                         Text(
                             text = "${(bookZoom * 100).roundToInt()}%",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = DeepEspressoText,
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier
-                                .padding(horizontal = 2.dp)
+                                .padding(horizontal = 3.dp)
                                 .clickable {
                                     bookZoom = 1f
                                     pdfPanX = 0f
@@ -2569,63 +2648,13 @@ fun ChessStudyScreen() {
                         OutlinedButton(
                             onClick = { bookZoom = (bookZoom + 0.25f).coerceAtMost(4f) },
                             colors = tanButtonColors,
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
-                        ) { Text("🔍+", fontSize = 10.sp) }
+                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
+                            contentPadding = PaddingValues(horizontal = 5.dp, vertical = 2.dp)
+                        ) { Text("🔍+", fontSize = 10.sp, maxLines = 1, softWrap = false) }
                     }
                 }
 
-                if (totalPages > 1) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                if (currentPage > 0) {
-                                    pdfPanX = 0f; pdfPanY = 0f
-                                    if (pdfUriString != null) {
-                                        renderPdfPage(Uri.parse(pdfUriString), currentPage - 1)
-                                    } else if (epubChapters.isNotEmpty()) {
-                                        currentPage--
-                                        bookText = epubChapters[currentPage]
-                                        scope.launch { bookScrollState.scrollTo(0) }
-                                    }
-                                }
-                            },
-                            colors = tanButtonColors,
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) { Text("◀ Page", fontSize = 10.sp) }
-                        Text(
-                            "  Page ${currentPage + 1} of $totalPages  ",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = DeepEspressoText
-                        )
-                        OutlinedButton(
-                            onClick = {
-                                if (currentPage < totalPages - 1) {
-                                    pdfPanX = 0f; pdfPanY = 0f
-                                    if (pdfUriString != null) {
-                                        renderPdfPage(Uri.parse(pdfUriString), currentPage + 1)
-                                    } else if (epubChapters.isNotEmpty()) {
-                                        currentPage++
-                                        bookText = epubChapters[currentPage]
-                                        scope.launch { bookScrollState.scrollTo(0) }
-                                    }
-                                }
-                            },
-                            colors = tanButtonColors,
-                            modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) { Text("Page ▶", fontSize = 10.sp) }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 if (pdfBitmap != null) {
                     Box(
@@ -2657,7 +2686,7 @@ fun ChessStudyScreen() {
                             contentDescription = "Chess Book PDF Page",
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(4.dp)
+                                .padding(2.dp)
                                 .graphicsLayer(
                                     scaleX = bookZoom,
                                     scaleY = bookZoom,
@@ -2687,10 +2716,10 @@ fun ChessStudyScreen() {
         }
     }
 
-    // --- CHESSBOARD PANE ---
+    // --- CHESSBOARD PANE (Responsive Square Board + Single Bottom-Right Tools Menu) ---
     val boardPane: @Composable (Modifier) -> Unit = { mod ->
         val evalScrollState = rememberScrollState()
-        val compactBtnMod = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 32.dp)
+        val compactBtnMod = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 30.dp)
         val displayedBoard = if (isSetupMode) setupBoard else currentBoard
 
         Column(
@@ -2721,7 +2750,7 @@ fun ChessStudyScreen() {
                                 val isSelected = (setupSelectedTool == tool)
                                 Box(
                                     modifier = Modifier
-                                        .size(32.dp)
+                                        .size(30.dp)
                                         .clip(RoundedCornerShape(6.dp))
                                         .background(if (isSelected) WoodSelectedSquare else SoftTanButton)
                                         .border(1.dp, DarkWalnutBorder, RoundedCornerShape(6.dp))
@@ -2729,9 +2758,9 @@ fun ChessStudyScreen() {
                                     contentAlignment = Alignment.Center
                                 ) {
                                     if (tool == ' ') {
-                                        Text("🗑️", fontSize = 14.sp)
+                                        Text("🗑️", fontSize = 13.sp)
                                     } else {
-                                        SolidChessPiece(tool)
+                                        SolidChessPiece(tool, 20.sp)
                                     }
                                 }
                             }
@@ -2745,29 +2774,31 @@ fun ChessStudyScreen() {
                             OutlinedButton(
                                 onClick = { setupWhiteToMove = !setupWhiteToMove },
                                 colors = tanButtonColors,
-                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
+                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
                                     if (setupWhiteToMove) "Turn: ⚪ White" else "Turn: ⚫ Black",
                                     fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
 
                             OutlinedButton(
                                 onClick = { setupBoard = emptyBoardString() },
                                 colors = tanButtonColors,
-                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
+                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
-                            ) { Text("Clear", fontSize = 10.sp) }
+                            ) { Text("Clear", fontSize = 10.sp, maxLines = 1, softWrap = false) }
 
                             OutlinedButton(
                                 onClick = { setupBoard = initialBoardString() },
                                 colors = tanButtonColors,
-                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
+                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
-                            ) { Text("Initial", fontSize = 10.sp) }
+                            ) { Text("Initial", fontSize = 10.sp, maxLines = 1, softWrap = false) }
 
                             Button(
                                 onClick = {
@@ -2781,18 +2812,18 @@ fun ChessStudyScreen() {
                                     isSetupMode = false
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3B6E33)),
-                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 28.dp),
+                                modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 26.dp),
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                             ) {
-                                Text("✅ Apply", fontSize = 10.sp, color = Color.White)
+                                Text("✅ Apply", fontSize = 10.sp, color = Color.White, maxLines = 1, softWrap = false)
                             }
                         }
                     }
                 }
             }
 
-            // Outer Wood Panel: Tapping the wood margin at the side of the board toggles coordinates!
-            Box(
+            // Outer Wood Panel with BoxWithConstraints so the board ALWAYS renders at max square size
+            BoxWithConstraints(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -2802,14 +2833,17 @@ fun ChessStudyScreen() {
                     .clickable {
                         showCoordinates = !showCoordinates
                     }
-                    .padding(6.dp),
+                    .padding(4.dp),
                 contentAlignment = Alignment.Center
             ) {
+                val boardSide = minOf(maxWidth, maxHeight)
+                val dynamicPieceSp = ((boardSide.value / 8f) * 0.62f).coerceIn(12f, 28f).sp
+                val dynamicCoordSp = ((boardSide.value / 8f) * 0.22f).coerceIn(6f, 10f).sp
+
                 Box(
                     modifier = Modifier
-                        .fillMaxHeight()
-                        .aspectRatio(1f)
-                        .border(3.dp, DarkWalnutBorder)
+                        .size(boardSide)
+                        .border(2.5.dp, DarkWalnutBorder)
                 ) {
                     Column(modifier = Modifier.fillMaxSize()) {
                         for (visualRow in 0..7) {
@@ -2881,34 +2915,34 @@ fun ChessStudyScreen() {
                                         if (showCoordinates && visualCol == 0) {
                                             Text(
                                                 text = "${8 - actualRow}",
-                                                fontSize = 9.sp,
+                                                fontSize = dynamicCoordSp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = coordColor,
                                                 modifier = Modifier
                                                     .align(Alignment.TopStart)
-                                                    .padding(start = 2.dp, top = 1.dp)
+                                                    .padding(start = 1.5.dp, top = 0.5.dp)
                                             )
                                         }
                                         if (showCoordinates && visualRow == 7) {
                                             Text(
                                                 text = "${'a' + actualCol}",
-                                                fontSize = 9.sp,
+                                                fontSize = dynamicCoordSp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = coordColor,
                                                 modifier = Modifier
                                                     .align(Alignment.BottomEnd)
-                                                    .padding(end = 2.dp, bottom = 0.dp)
+                                                    .padding(end = 1.5.dp, bottom = 0.dp)
                                             )
                                         }
                                         Box(
                                             modifier = Modifier.fillMaxSize(),
                                             contentAlignment = Alignment.Center
                                         ) {
-                                            SolidChessPiece(displayedBoard[index])
+                                            SolidChessPiece(displayedBoard[index], dynamicPieceSp)
                                             if (isLegalTarget) {
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(if (displayedBoard[index] == ' ') 10.dp else 28.dp)
+                                                        .size(if (displayedBoard[index] == ' ') 9.dp else 24.dp)
                                                         .clip(CircleShape)
                                                         .background(
                                                             if (displayedBoard[index] == ' ') Color(0x552E5A27)
@@ -2929,21 +2963,21 @@ fun ChessStudyScreen() {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 100.dp)
-                        .padding(top = 4.dp),
+                        .heightIn(max = if (isLandscape) 64.dp else 80.dp)
+                        .padding(top = 3.dp),
                     colors = CardDefaults.cardColors(containerColor = ParchmentCardBg),
                     border = BorderStroke(1.dp, Color(0xFFB08968))
                 ) {
                     Column(
                         modifier = Modifier
                             .verticalScroll(evalScrollState)
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         val turnIndicator = if (whiteToMove) "⚪ White to move" else "⚫ Black to move"
                         if (pgnAnnotated.isEmpty()) {
                             Text(
                                 text = "$turnIndicator • Tap wood side of board to toggle coordinates",
-                                fontSize = 11.sp,
+                                fontSize = 10.sp,
                                 fontFamily = FontFamily.Monospace,
                                 color = DeepEspressoText
                             )
@@ -2953,7 +2987,7 @@ fun ChessStudyScreen() {
                                 style = TextStyle(
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
-                                    lineHeight = 16.sp
+                                    lineHeight = 15.sp
                                 ),
                                 onClick = { offset ->
                                     pgnAnnotated.getStringAnnotations(tag = "NODE", start = offset, end = offset)
@@ -2970,9 +3004,9 @@ fun ChessStudyScreen() {
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = engineEvalText,
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
-                            lineHeight = 14.sp,
+                            lineHeight = 13.sp,
                             color = if (isEngineRunning) Color(0xFF2E5A27) else Color(0xFF5C3A21),
                             fontWeight = if (isEngineRunning) FontWeight.Bold else FontWeight.Normal
                         )
@@ -2980,14 +3014,14 @@ fun ChessStudyScreen() {
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(3.dp))
 
-            // --- CLEAN UNFOLDING BOTTOM CONTROL BAR ---
+            // --- ULTRA-COMPACT BOTTOM BAR: ◀  ▶  ⌫  and Single Unfolding Menu (Board / Annotate / Engine) ---
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
@@ -3000,8 +3034,8 @@ fun ChessStudyScreen() {
                     enabled = currentNode.parentId != null && !isSetupMode,
                     colors = tanButtonColors,
                     modifier = compactBtnMod,
-                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 2.dp)
-                ) { Text("◀", fontSize = 12.sp) }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
+                ) { Text("◀", fontSize = 12.sp, maxLines = 1, softWrap = false) }
 
                 OutlinedButton(
                     onClick = {
@@ -3013,8 +3047,8 @@ fun ChessStudyScreen() {
                     enabled = currentNode.children.isNotEmpty() && !isSetupMode,
                     colors = tanButtonColors,
                     modifier = compactBtnMod,
-                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 2.dp)
-                ) { Text("▶", fontSize = 12.sp) }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
+                ) { Text("▶", fontSize = 12.sp, maxLines = 1, softWrap = false) }
 
                 OutlinedButton(
                     onClick = {
@@ -3034,21 +3068,28 @@ fun ChessStudyScreen() {
                     enabled = currentNode.parentId != null && !isSetupMode,
                     colors = tanButtonColors,
                     modifier = compactBtnMod,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                ) { Text("⌫", fontSize = 12.sp) }
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                ) { Text("⌫", fontSize = 12.sp, maxLines = 1, softWrap = false) }
 
-                // UNFOLDING MENU 1: BOARD OPTIONS
+                // SINGLE RIGHT-CORNER UNFOLDING BUTTON FOR BOARD, ANNOTATE, AND ENGINE
                 Box {
+                    val hasNote = currentNode.nag.isNotEmpty() || currentNode.comment.isNotEmpty()
                     Button(
                         onClick = { showBoardMenu = true },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = WarmBrownButton,
+                            containerColor = if (isEngineRunning) Color(0xFF3B6E33) else WarmBrownButton,
                             contentColor = Color(0xFFFFF8F0)
                         ),
                         modifier = compactBtnMod,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp)
                     ) {
-                        Text("♟️ Board ▾", fontSize = 11.sp)
+                        val label = buildString {
+                            if (isEngineRunning) append("⚡ SF:${multiPvCount}x")
+                            else append("⚙️ Tools")
+                            if (hasNote) append("*")
+                            append(" ▾")
+                        }
+                        Text(label, fontSize = 11.sp, maxLines = 1, softWrap = false)
                     }
 
                     DropdownMenu(
@@ -3056,6 +3097,81 @@ fun ChessStudyScreen() {
                         onDismissRequest = { showBoardMenu = false },
                         modifier = Modifier.background(ParchmentCardBg)
                     ) {
+                        // --- SECTION 1: ANNOTATE & NOTATION ---
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (hasNote) "✍️ Edit Move Note / Symbol (*)" else "✍️ Annotate Move (!, ?, {note})",
+                                    fontWeight = FontWeight.Bold,
+                                    color = DeepEspressoText
+                                )
+                            },
+                            onClick = {
+                                showBoardMenu = false
+                                showAnnotationDialog = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (showNotation) "📜 Hide Notation Box" else "📜 Show Notation Box",
+                                    color = DeepEspressoText
+                                )
+                            },
+                            onClick = {
+                                showBoardMenu = false
+                                showNotation = !showNotation
+                            }
+                        )
+
+                        HorizontalDivider(color = Color(0xFFC8B6A6))
+
+                        // --- SECTION 2: STOCKFISH ENGINE ---
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (isEngineRunning) "⏹️ Turn Stockfish OFF" else "⚡ Turn Stockfish ON (${multiPvCount}x)",
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF2E5A27)
+                                )
+                            },
+                            onClick = {
+                                showBoardMenu = false
+                                if (!isEngineRunning) {
+                                    if (locateStockfishBinary(context) == null) {
+                                        showInstallStockfishDialog = true
+                                    } else {
+                                        isEngineRunning = true
+                                        showNotation = true
+                                    }
+                                } else {
+                                    isEngineRunning = false
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "🔢 Engine Lines (Currently ${multiPvCount}x) ▸",
+                                    color = DeepEspressoText
+                                )
+                            },
+                            onClick = {
+                                showBoardMenu = false
+                                showEngineMenu = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("📦 Install / Configure Local Stockfish...", color = DeepEspressoText) },
+                            onClick = {
+                                showBoardMenu = false
+                                showInstallStockfishDialog = true
+                            }
+                        )
+
+                        HorizontalDivider(color = Color(0xFFC8B6A6))
+
+                        // --- SECTION 3: BOARD & PGN ACTIONS ---
                         DropdownMenuItem(
                             text = { Text("➕ Add new game to current PGN", fontWeight = FontWeight.Bold, color = Color(0xFF2E5A27)) },
                             onClick = {
@@ -3126,63 +3242,13 @@ fun ChessStudyScreen() {
                             }
                         )
                     }
-                }
 
-                // UNFOLDING OPTION 2: NOTATION EDITOR
-                OutlinedButton(
-                    onClick = { showAnnotationDialog = true },
-                    colors = tanButtonColors,
-                    modifier = compactBtnMod,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                ) {
-                    val hasNote = currentNode.nag.isNotEmpty() || currentNode.comment.isNotEmpty()
-                    Text(if (hasNote) "✍️ Note*" else "✍️ Annotate", fontSize = 11.sp)
-                }
-
-                // UNFOLDING MENU 3: STOCKFISH & NOTATION PANE OPTIONS
-                Box {
-                    Button(
-                        onClick = { showEngineMenu = true },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isEngineRunning) Color(0xFF3B6E33) else SoftTanButton,
-                            contentColor = if (isEngineRunning) Color(0xFFFFF8F0) else DeepEspressoText
-                        ),
-                        modifier = compactBtnMod,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            if (isEngineRunning) "⚡ SF:${multiPvCount}x ▾" else "⚡ Engine ▾",
-                            fontSize = 11.sp
-                        )
-                    }
-
+                    // Secondary sub-menu when choosing number of Engine Lines (1x..5x)
                     DropdownMenu(
                         expanded = showEngineMenu,
                         onDismissRequest = { showEngineMenu = false },
                         modifier = Modifier.background(ParchmentCardBg)
                     ) {
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    if (isEngineRunning) "⏹️ Turn Stockfish OFF" else "▶️ Turn Stockfish ON",
-                                    fontWeight = FontWeight.Bold,
-                                    color = DeepEspressoText
-                                )
-                            },
-                            onClick = {
-                                showEngineMenu = false
-                                if (!isEngineRunning) {
-                                    if (locateStockfishBinary(context) == null) {
-                                        showInstallStockfishDialog = true
-                                    } else {
-                                        isEngineRunning = true
-                                        showNotation = true
-                                    }
-                                } else {
-                                    isEngineRunning = false
-                                }
-                            }
-                        )
                         for (pv in 1..5) {
                             DropdownMenuItem(
                                 text = {
@@ -3199,25 +3265,6 @@ fun ChessStudyScreen() {
                                 }
                             )
                         }
-                        DropdownMenuItem(
-                            text = { Text("📦 Install / Configure Local Stockfish...", color = DeepEspressoText) },
-                            onClick = {
-                                showEngineMenu = false
-                                showInstallStockfishDialog = true
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    if (showNotation) "📜 Hide Notation Box" else "📜 Show Notation Box",
-                                    color = DeepEspressoText
-                                )
-                            },
-                            onClick = {
-                                showEngineMenu = false
-                                showNotation = !showNotation
-                            }
-                        )
                     }
                 }
             }
